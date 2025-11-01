@@ -1313,8 +1313,17 @@ int btmtk_usb_setup(struct hci_dev *hdev)
 	btmtk_data->dev_id = dev_id;
 
 	err = btmtk_register_coredump(hdev, btmtk_data->drv_name, fw_version);
-	if (err < 0)
-		bt_dev_err(hdev, "Failed to register coredump (%d)", err);
+
+
+if (err < 0) {
+    return err;
+}
+
+pr_info("btmtk_debug: device %s: dev_id=0x%08x fw_version=0x%04x fw_flavor=0x%02x\n",
+        hdev->name, dev_id, fw_version, fw_flavor);
+
+
+
 
 	switch (dev_id) {
 	case 0x7663:
@@ -1324,43 +1333,50 @@ int btmtk_usb_setup(struct hci_dev *hdev)
 		fwname = FIRMWARE_MT7668;
 		break;
         case 0x6639:
-/* Device-specific WMT FUNC_CTRL for MT6639 */
-fwname = FIRMWARE_MT6639;
+                fwname = FIRMWARE_MT6639;
 
-/* reset endpoint */
-err = btmtk_usb_uhw_reg_write(hdev, MTK_EP_RST_OPT, MTK_EP_RST_IN_OUT_OPT);
-if (err < 0)
-    return err;
+                /* Endpoint reset before WMT FUNC_CTRL */
+                err = btmtk_usb_uhw_reg_write(hdev, MTK_EP_RST_OPT,
+                                              MTK_EP_RST_IN_OUT_OPT);
+               if (err < 0) {
+                        bt_dev_err(hdev, "Failed EP reset (%d)", err);
+                        return err;
+                }
 
-/* small delay after firmware download */
-msleep(100);
+                /* Optional delay after firmware download (chip settle time) */
+                msleep(200);
 
-/* enable Bluetooth protocol */
-param = 1;
-wmt_params.op = BTMTK_WMT_FUNC_CTRL;
-wmt_params.flag = 0;
-wmt_params.dlen = sizeof(param);
-wmt_params.data = &param;
-wmt_params.status = NULL;
+                /* Send WMT FUNC_CTRL with debug logging */
+                param = 1;
+                wmt_params.op    = BTMTK_WMT_FUNC_CTRL;
+                wmt_params.flag  = 0;
+                wmt_params.dlen  = sizeof(param);
+                wmt_params.data  = &param;
+                wmt_params.status = NULL;
 
-/* send WMT with longer timeout */
-err = btmtk_usb_hci_wmt_sync(hdev, &wmt_params);
-if (err < 0) {
-    bt_dev_err(hdev, "Failed to send wmt func ctrl (%d)", err);
-    return err;
-}
+                pr_info("btmtk_debug: WMT FUNC_CTRL sending op=0x%02x flag=0x%02x dlen=%u\n",
+                        wmt_params.op, wmt_params.flag, wmt_params.dlen);
 
-/* mark device as capable */
-hci_set_msft_opcode(hdev, 0xFD30);
-hci_set_aosp_capable(hdev);
+                /* Increase timeout inside btmtk_usb_hci_wmt_sync if needed */
+                err = btmtk_usb_hci_wmt_sync(hdev, &wmt_params);
+                if (err < 0) {
+                        bt_dev_err(hdev, "Failed to send WMT FUNC_CTRL (%d)", err);
+                        return err;
+                }
 
-/* setup ISO interface if required */
-if (test_bit(BTMTK_ISOPKT_OVER_INTR, &btmtk_data->flags)) {
-    if (!btmtk_usb_isointf_init(hdev))
-        set_bit(BTMTK_ISOPKT_RUNNING, &btmtk_data->flags);
-}
+                pr_info("btmtk_debug: WMT FUNC_CTRL sent successfully\n");
 
-goto done;
+                /* Set MSFT opcode and AOSP capable flags */
+                hci_set_msft_opcode(hdev, 0xFD30);
+                hci_set_aosp_capable(hdev);
+
+                /* Set up ISO interface if applicable */
+                if (test_bit(BTMTK_ISOPKT_OVER_INTR, &btmtk_data->flags)) {
+                        if (!btmtk_usb_isointf_init(hdev))
+                                set_bit(BTMTK_ISOPKT_RUNNING, &btmtk_data->flags);
+                }
+
+                goto done;
 	case 0x7922:
 	case 0x7925:
 	case 0x7961:
