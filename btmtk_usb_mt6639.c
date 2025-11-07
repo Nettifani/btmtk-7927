@@ -84,7 +84,7 @@ enum {
 };
 
 /* Maximum firmware segment size (Android driver uses 1024) */
-#define FW_MAX_SEGMENT_SIZE	1024
+#define FW_MAX_SEGMENT_SIZE	2048
 
 struct btmtk_data {
 	struct hci_dev *hdev;
