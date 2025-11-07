@@ -716,6 +716,7 @@ static int btmtk_load_firmware_66xx(struct btmtk_data *data)
 	}
 
 	{
+	    // NOTE: These numbers are based on a packet dump from Windows. I compared the order of the firmware blobs being uploaded.
 	    int sections[] = {1, 0, 3, 2, 4};
 	    for (int idx = 0; idx < sizeof(sections) / sizeof(sections[0]); idx++) {
 		int section_num = sections[idx];
