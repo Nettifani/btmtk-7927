@@ -547,47 +547,35 @@ static int btmtk_download_fw_section_info(struct btmtk_data *data, const struct 
 }
 
 static int btmtk_download_fw_segment(struct btmtk_data *data,
-				     const u8 *fw_data, size_t fw_len,
-				     u8 phase)
+				     const u8 *fw_data, size_t fw_len)
 {
 	struct hci_dev *hdev = data->hdev;
-	u8 *cmd_buf;
-	size_t cmd_len;
-	u16 param_len;
+	u8 *data_buf;
 	int err;
+	unsigned int pipe;
+	int actual_len;
 
-	/* Windows driver format for WMT PATCH_DOWNLOAD (from reverse engineering):
-	 * Byte 0: Direction (0x01 = command)
-	 * Byte 1: Opcode (0x01 = PATCH_DWNLD)
-	 * Bytes 2-3: Parameter length (LE, excludes 4-byte header)
-	 * Bytes 4+: Parameters (firmware data)
-	 *
-	 * From disassembly at RVA 0x140001284-0x1400012c0:
-	 * - Direction and opcode are set
-	 * - Firmware data sent in 1000-byte chunks
-	 * - May include 4-byte metadata before data
-	 */
-	cmd_len = 4 + fw_len;  /* direction + opcode + length + data */
-	cmd_buf = kmalloc(cmd_len, GFP_KERNEL);
-	if (!cmd_buf)
-		return -ENOMEM;
+	data_buf = kmalloc(fw_len, GFP_KERNEL);
+	if (!data_buf)
+	    return -ENOMEM;
 
-	/* Parameter length = everything after the 4-byte header */
-	param_len = fw_len;
+	memcpy(data_buf, fw_data, fw_len);
 
-	/* Build WMT patch download command (Windows driver format) */
-	cmd_buf[0] = 0x01;                       /* Direction: command */
-	cmd_buf[1] = WMT_OPCODE_PATCH_DOWNLOAD;  /* Opcode: 0x01 */
-	cmd_buf[2] = param_len & 0xFF;           /* Param length low byte */
-	cmd_buf[3] = (param_len >> 8) & 0xFF;    /* Param length high byte */
-	memcpy(&cmd_buf[4], fw_data, fw_len);    /* Firmware data */
+	pipe = usb_sndbulkpipe(data->udev, data->bulk_tx_ep->bEndpointAddress);
+	err = usb_bulk_msg(data->udev, pipe, data_buf, fw_len, &actual_len, 500);
+	if (err < 0) {
+	    bt_dev_err(hdev, "btmtk_download_fw_segment: usb_bulk_msg returned %d", err);
+	    goto err_free_buf;
+	}
 
-	bt_dev_dbg(hdev, "Downloading segment: phase=%d len=%zu", phase, fw_len);
+	if (actual_len < fw_len) {
+	    bt_dev_err(hdev, "btmtk_download_fw_segment: only %d bytes out of %zu was sent", actual_len, fw_len);
+	    err = -EINVAL;
+	    goto err_free_buf;
+	}
 
-	err = btmtk_send_wmt_cmd(data, cmd_buf, cmd_len,
-				 WMT_OPCODE_PATCH_DOWNLOAD);
-
-	kfree(cmd_buf);
+err_free_buf:
+	kfree(data_buf);
 	return err;
 }
 
@@ -657,7 +645,7 @@ static int btmtk_load_firmware_section(struct btmtk_data *data, int section_num)
 		segment_count + 1, max_segments,
 		fw_ptr - data->fw->data, segment_len, fw_remain, phase);
 
-	err = btmtk_download_fw_segment(data, fw_ptr, segment_len, phase);
+	err = btmtk_download_fw_segment(data, fw_ptr, segment_len);
 	if (err < 0) {
 	    bt_dev_err(data->hdev, "Failed to download segment %d: %d",
 			segment_count + 1, err);
