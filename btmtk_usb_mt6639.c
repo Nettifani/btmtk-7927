@@ -93,12 +93,6 @@ struct mtk_fw_section_map {
 	};
 } __packed;
 
-struct mtk_fw_firmware_upload_info {
-    u8 unk00;
-    u8 unk01;
-    struct mtk_fw_section_info_spec data;
-} __packed;
-
 /* Driver flags */
 enum {
 	BTMTK_FIRMWARE_LOADED,
@@ -518,6 +512,40 @@ static int btmtk_query_fw_status(struct btmtk_data *data)
 	return btmtk_send_wmt_cmd(data, cmd, sizeof(cmd), WMT_OPCODE_PATCH_DOWNLOAD);
 }
 
+static int btmtk_download_fw_section_info(struct btmtk_data *data, const struct mtk_fw_section_info_spec *info)
+{
+	struct hci_dev *hdev = data->hdev;
+	u8 *cmd_buf;
+	size_t cmd_len;
+	u16 param_len;
+	int err;
+
+	/* Parameter length = everything after the 4-byte header */
+	param_len = 2 + sizeof(*info);
+
+	cmd_len = 4 + param_len;  /* direction + opcode + length + data */
+	cmd_buf = kmalloc(cmd_len, GFP_KERNEL);
+	if (!cmd_buf)
+		return -ENOMEM;
+
+	/* Build WMT patch download command (Windows driver format) */
+	cmd_buf[0] = 0x01;                       /* Direction: command */
+	cmd_buf[1] = WMT_OPCODE_PATCH_DOWNLOAD;  /* Opcode: 0x01 */
+	cmd_buf[2] = param_len & 0xFF;           /* Param length low byte */
+	cmd_buf[3] = (param_len >> 8) & 0xFF;    /* Param length high byte */
+	cmd_buf[4] = 0x00;
+	cmd_buf[5] = 0x01;
+	memcpy(&cmd_buf[6], info, sizeof(*info));    /* Firmware data */
+
+	bt_dev_dbg(hdev, "Downloading firmware section info: cmd_len %zu", cmd_len);
+
+	err = btmtk_send_wmt_cmd(data, cmd_buf, cmd_len,
+				 WMT_OPCODE_PATCH_DOWNLOAD);
+
+	kfree(cmd_buf);
+	return err;
+}
+
 static int btmtk_download_fw_segment(struct btmtk_data *data,
 				     const u8 *fw_data, size_t fw_len,
 				     u8 phase)
@@ -585,19 +613,11 @@ static int btmtk_load_firmware_section(struct btmtk_data *data, int section_num)
     fw_remain = section_info->sec_size;
 
     /* Send section info to device */
-    {
-	struct mtk_fw_firmware_upload_info info_payload;
-	memset(&info_payload, 0, sizeof(info_payload));
-	info_payload.unk00 = 0;
-	info_payload.unk01 = 1;
-	info_payload.data = section_info->info_spec;
-
-	bt_dev_info(data->hdev, "Sending firmware section info to device");
-	err = btmtk_download_fw_segment(data, (void*)&info_payload, sizeof(info_payload), FW_PHASE_START);
-	if (err < 0) {
-	    bt_dev_err(data->hdev, "Failed to upload firmware section info: %d", err);
-	    return err;
-	}
+    bt_dev_info(data->hdev, "Sending firmware section info to device");
+    err = btmtk_download_fw_section_info(data, &section_info->info_spec);
+    if (err < 0) {
+	bt_dev_err(data->hdev, "Failed to upload firmware section info: %d", err);
+	return err;
     }
 
     /* Calculate expected number of segments */
