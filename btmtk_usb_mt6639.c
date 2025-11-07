@@ -1181,7 +1181,7 @@ static int btmtk_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 			return -ENOMEM;
 		}
 
-		dr->bRequestType = USB_TYPE_CLASS | USB_RECIP_INTERFACE;
+		dr->bRequestType = USB_TYPE_CLASS | USB_RECIP_DEVICE;
 		dr->bRequest = 0;
 		dr->wIndex = cpu_to_le16(0);  /* Interface 0 */
 		dr->wValue = cpu_to_le16(0);
