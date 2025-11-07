@@ -61,20 +61,42 @@ struct mtk_fw_global_descr {
 	__le32 section_num;
 } __packed;
 
+struct mtk_fw_section_info_spec {
+    __le32 dl_addr;       /* Download address in device memory */
+    __le32 dl_size;       /* Size to download */
+    __le32 sec_key_idx;
+    __le32 align_len;
+    __le32 sec_type2;
+    __le32 dl_mode_crc;   /* Bits 16-23: bin_index, Bits 0-7: dl_mode */
+    __le32 crc;
+    __le32 reserved[6];
+} __packed;
+
 /* Section Map at offset 96+ (Android: struct _Section_Map) */
 struct mtk_fw_section_map {
 	__le32 sec_type;
 	__le32 sec_offset;    /* Offset to section data in firmware file */
 	__le32 sec_size;      /* Size of section */
 	/* bin_info_spec union - 52 bytes */
-	__le32 dl_addr;       /* Download address in device memory */
-	__le32 dl_size;       /* Size to download */
-	__le32 sec_key_idx;
-	__le32 align_len;
-	__le32 sec_type2;
-	__le32 dl_mode_crc;   /* Bits 16-23: bin_index, Bits 0-7: dl_mode */
-	__le32 crc;
-	__le32 reserved[6];
+	union {
+	    struct {
+		__le32 dl_addr;       /* Download address in device memory */
+		__le32 dl_size;       /* Size to download */
+		__le32 sec_key_idx;
+		__le32 align_len;
+		__le32 sec_type2;
+		__le32 dl_mode_crc;   /* Bits 16-23: bin_index, Bits 0-7: dl_mode */
+		__le32 crc;
+		__le32 reserved[6];
+	    };
+	    struct mtk_fw_section_info_spec info_spec;
+	};
+} __packed;
+
+struct mtk_fw_firmware_upload_info {
+    u8 unk00;
+    u8 unk01;
+    struct mtk_fw_section_info_spec data;
 } __packed;
 
 /* Driver flags */
@@ -541,14 +563,122 @@ static int btmtk_download_fw_segment(struct btmtk_data *data,
 	return err;
 }
 
+static int btmtk_load_firmware_section(struct btmtk_data *data, int section_num)
+{
+    const struct mtk_fw_section_map *section_info;
+    const u8 *fw_ptr;
+    size_t fw_remain;
+    u8 phase;
+    int err;
+    int segment_count = 0;
+    int max_segments;
+
+    bt_dev_info(data->hdev, "Loading firmware section #%d", section_num);
+
+    section_info = (struct mtk_fw_section_map*)(data->fw->data + MTK_FW_SECTION_MAP_OFFSET + section_num * MTK_FW_SECTION_MAP_SIZE);
+    if (data->fw->size < section_info->sec_offset + section_info->sec_size) {
+    	bt_dev_err(data->hdev, "Firmware truncated: %zu bytes too few", section_info->sec_offset + section_info->sec_size - data->fw->size);
+    	return -EINVAL;
+    }
+
+    fw_ptr = data->fw->data + section_info->sec_offset;
+    fw_remain = section_info->sec_size;
+
+    /* Send section info to device */
+    {
+	struct mtk_fw_firmware_upload_info info_payload;
+	memset(&info_payload, 0, sizeof(info_payload));
+	info_payload.unk00 = 0;
+	info_payload.unk01 = 1;
+	info_payload.data = section_info->info_spec;
+
+	bt_dev_info(data->hdev, "Sending firmware section info to device");
+	err = btmtk_download_fw_segment(data, (void*)&info_payload, sizeof(info_payload), FW_PHASE_START);
+	if (err < 0) {
+	    bt_dev_err(data->hdev, "Failed to upload firmware section info: %d", err);
+	    return err;
+	}
+    }
+
+    /* Calculate expected number of segments */
+    max_segments = (fw_remain + FW_MAX_SEGMENT_SIZE - 1) / FW_MAX_SEGMENT_SIZE;
+    bt_dev_info(data->hdev, "Downloading firmware section #%d: %zu bytes in %d segments", section_num, fw_remain, max_segments);
+
+    pr_info("btmtk_usb_mt6639: ===== STARTING FIRMWARE LOAD =====\n");
+    pr_info("btmtk_usb_mt6639: Section offset: 0x%06zX (%zu)\n", data->fw_offset, data->fw_offset);
+    pr_info("btmtk_usb_mt6639: Section size: %zu bytes\n", fw_remain);
+    pr_info("btmtk_usb_mt6639: Segments: %d (max %d bytes each)\n", max_segments, FW_MAX_SEGMENT_SIZE);
+
+    while (fw_remain > 0) {
+    	size_t segment_len = min_t(size_t, fw_remain, FW_MAX_SEGMENT_SIZE);
+    
+	/* Safety check: prevent infinite loop */
+	if (segment_count >= max_segments + 10) {
+	    bt_dev_err(data->hdev, "Firmware download stuck at segment %d (max %d)",
+			segment_count, max_segments);
+	    err = -ETIMEDOUT;
+	    return err;
+	}
+
+	/* Determine phase */
+	if (fw_ptr == data->fw->data + data->fw_offset) {
+	    phase = FW_PHASE_START;
+	    bt_dev_info(data->hdev, "Starting firmware download (segment 1/%d)",
+			max_segments);
+	} else if (fw_remain <= FW_MAX_SEGMENT_SIZE) {
+	    phase = FW_PHASE_END;
+	    bt_dev_info(data->hdev, "Sending final segment (%d/%d)",
+			segment_count + 1, max_segments);
+	} else {
+	    phase = FW_PHASE_CONTINUE;
+	}
+
+	pr_info("btmtk_usb_mt6639: Segment %d/%d: offset=%zu len=%zu remain=%zu phase=%d\n",
+		segment_count + 1, max_segments,
+		fw_ptr - data->fw->data, segment_len, fw_remain, phase);
+
+	err = btmtk_download_fw_segment(data, fw_ptr, segment_len, phase);
+	if (err < 0) {
+	    bt_dev_err(data->hdev, "Failed to download segment %d: %d",
+			segment_count + 1, err);
+	    return err;
+	}
+
+	fw_ptr += segment_len;
+	fw_remain -= segment_len;
+	segment_count++;
+
+	/* Progress indicator every 100 segments */
+	if (segment_count % 100 == 0) {
+	    bt_dev_info(data->hdev, "Progress: %d/%d segments (%d%%)",
+			segment_count, max_segments,
+			(segment_count * 100) / max_segments);
+	}
+
+	/* Small delay between segments */
+	msleep(20);
+    }
+
+    bt_dev_info(data->hdev, "All %d firmware segments sent successfully",
+		segment_count);
+
+    /* Send DMA complete command */
+    bt_dev_info(data->hdev, "Sending DMA complete");
+    err = btmtk_send_wmt_dma_complete(data);
+    if (err < 0) {
+        bt_dev_err(data->hdev, "DMA complete failed: %d", err);
+        return err;
+    }
+
+    /* Wait for firmware to initialize */
+    msleep(500);
+
+    return 0;
+}
+
 static int btmtk_load_firmware_66xx(struct btmtk_data *data)
 {
-	const u8 *fw_ptr;
-	size_t fw_remain;
-	u8 phase;
 	int err;
-	int segment_count = 0;
-	int max_segments;
 
 	bt_dev_info(data->hdev, "Loading firmware for MT6639 (MT66xx format)");
 
@@ -576,82 +706,17 @@ static int btmtk_load_firmware_66xx(struct btmtk_data *data)
 		pr_info("btmtk_usb_mt6639: Firmware status query successful, proceeding with download\n");
 	}
 
-	/* Download BT firmware section only (not entire file) */
-	fw_ptr = data->fw->data + data->fw_offset;
-	fw_remain = data->fw_section_size;
-
-	/* Calculate expected number of segments */
-	max_segments = (fw_remain + FW_MAX_SEGMENT_SIZE - 1) / FW_MAX_SEGMENT_SIZE;
-	bt_dev_info(data->hdev, "Downloading BT firmware section: %zu bytes in %d segments",
-		    fw_remain, max_segments);
-	pr_info("btmtk_usb_mt6639: ===== STARTING FIRMWARE LOAD =====\n");
-	pr_info("btmtk_usb_mt6639: Section offset: 0x%06zX (%zu)\n", data->fw_offset, data->fw_offset);
-	pr_info("btmtk_usb_mt6639: Section size: %zu bytes\n", fw_remain);
-	pr_info("btmtk_usb_mt6639: Segments: %d (max %d bytes each)\n", max_segments, FW_MAX_SEGMENT_SIZE);
-
-	while (fw_remain > 0) {
-		size_t segment_len = min_t(size_t, fw_remain, FW_MAX_SEGMENT_SIZE);
-
-		/* Safety check: prevent infinite loop */
-		if (segment_count >= max_segments + 10) {
-			bt_dev_err(data->hdev, "Firmware download stuck at segment %d (max %d)",
-				   segment_count, max_segments);
-			err = -ETIMEDOUT;
-			goto err_release_fw;
-		}
-
-		/* Determine phase */
-		if (fw_ptr == data->fw->data + data->fw_offset) {
-			phase = FW_PHASE_START;
-			bt_dev_info(data->hdev, "Starting firmware download (segment 1/%d)",
-				    max_segments);
-		} else if (fw_remain <= FW_MAX_SEGMENT_SIZE) {
-			phase = FW_PHASE_END;
-			bt_dev_info(data->hdev, "Sending final segment (%d/%d)",
-				    segment_count + 1, max_segments);
-		} else {
-			phase = FW_PHASE_CONTINUE;
-		}
-
-		pr_info("btmtk_usb_mt6639: Segment %d/%d: offset=%zu len=%zu remain=%zu phase=%d\n",
-			segment_count + 1, max_segments,
-			fw_ptr - data->fw->data, segment_len, fw_remain, phase);
-
-		err = btmtk_download_fw_segment(data, fw_ptr, segment_len, phase);
+	{
+	    int sections[] = {1, 0, 3, 2, 4};
+	    for (int idx = 0; idx < sizeof(sections) / sizeof(sections[0]); idx++) {
+		int section_num = sections[idx];
+		err = btmtk_load_firmware_section(data, section_num);
 		if (err < 0) {
-			bt_dev_err(data->hdev, "Failed to download segment %d: %d",
-				   segment_count + 1, err);
-			goto err_release_fw;
+		    bt_dev_err(data->hdev, "Failed to load firmware section #%d: %d", section_num, err);
+		    goto err_release_fw;
 		}
-
-		fw_ptr += segment_len;
-		fw_remain -= segment_len;
-		segment_count++;
-
-		/* Progress indicator every 100 segments */
-		if (segment_count % 100 == 0) {
-			bt_dev_info(data->hdev, "Progress: %d/%d segments (%d%%)",
-				    segment_count, max_segments,
-				    (segment_count * 100) / max_segments);
-		}
-
-		/* Small delay between segments */
-		msleep(20);
+	    }
 	}
-
-	bt_dev_info(data->hdev, "All %d firmware segments sent successfully",
-		    segment_count);
-
-	/* Send DMA complete command */
-	bt_dev_info(data->hdev, "Sending DMA complete");
-	err = btmtk_send_wmt_dma_complete(data);
-	if (err < 0) {
-		bt_dev_err(data->hdev, "DMA complete failed: %d", err);
-		goto err_release_fw;
-	}
-
-	/* Wait for firmware to initialize */
-	msleep(500);
 
 	bt_dev_info(data->hdev, "Firmware loaded successfully");
 	set_bit(BTMTK_FIRMWARE_LOADED, &data->flags);
