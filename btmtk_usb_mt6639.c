@@ -365,12 +365,13 @@ static int btmtk_send_wmt_dma_complete(struct btmtk_data *data)
 	u8 cmd[] = {
 		0x01,        /* Direction: command */
 		0x01,        /* Opcode: PATCH_DOWNLOAD */
-		0x00, 0x00   /* Param length = 0 (no data for completion) */
+		0x01, 0x00,   /* Param length = 1 (no data for completion) */
+		0x03
 	};
 
 	bt_dev_info(data->hdev, "Sending firmware download completion");
-	pr_info("btmtk_usb_mt6639: WMT DMA Complete payload: %02x %02x %02x %02x\n",
-		cmd[0], cmd[1], cmd[2], cmd[3]);
+	pr_info("btmtk_usb_mt6639: WMT DMA Complete payload: %02x %02x %02x %02x %02x\n",
+		cmd[0], cmd[1], cmd[2], cmd[3], cmd[4]);
 	return btmtk_send_wmt_cmd(data, cmd, sizeof(cmd), WMT_OPCODE_PATCH_DOWNLOAD);
 }
 
